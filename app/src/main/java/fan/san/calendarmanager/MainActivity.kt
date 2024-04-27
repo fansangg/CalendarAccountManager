@@ -2,7 +2,12 @@ package fan.san.calendarmanager
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -37,11 +42,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,20 +59,33 @@ import androidx.compose.ui.unit.sp
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import fan.san.calendarmanager.ui.theme.CalendarManagerTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+	private var lastRequestPermissionTime = 0L
+	private var isTriggershouldShowRationale = false
+
 	@SuppressLint("CoroutineCreationDuringComposition")
 	@OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
 		setContent {
 			val viewModel by viewModels<MainViewModel>()
-			val permissionState = rememberMultiplePermissionsState(
-				permissions = listOf(
-					Manifest.permission.WRITE_CALENDAR, Manifest.permission.READ_CALENDAR
-				)
-			)
+			val alwaysDenial = remember {
+				mutableStateOf(false)
+			}
+			val permissionState = rememberMultiplePermissionsState(permissions = listOf(
+				Manifest.permission.WRITE_CALENDAR, Manifest.permission.READ_CALENDAR
+			), onPermissionsResult = {
+				if (it.values.all { flag -> !flag }) {
+					if (isTriggershouldShowRationale) alwaysDenial.value = true
+					if (System.currentTimeMillis() - lastRequestPermissionTime < 500) alwaysDenial.value =
+						true
+				}
+			})
+
 
 			val snackBarState = remember {
 				SnackbarHostState()
@@ -75,6 +96,12 @@ class MainActivity : ComponentActivity() {
 			val context = LocalContext.current
 
 			val msgContent = viewModel.eventFlow.collectAsState(initial = "")
+
+			LaunchedEffect(key1 = Unit) {
+				delay(300)
+				permissionState.launchMultiplePermissionRequest()
+				lastRequestPermissionTime = System.currentTimeMillis()
+			}
 
 			CalendarManagerTheme {
 				Surface(
@@ -89,8 +116,14 @@ class MainActivity : ComponentActivity() {
 							)
 						)
 					}, floatingActionButtonPosition = FabPosition.End, floatingActionButton = {
-						ElevatedButton(onClick = { viewModel.createTestCalendarAccount(context) }) {
+						if (permissionState.allPermissionsGranted) ElevatedButton(onClick = {
+							viewModel.createTestCalendarAccount(
+								context
+							)
+						}) {
 							Text(text = "创建一个测试账户")
+						} else {
+							Box {}
 						}
 					}, snackbarHost = { SnackbarHost(hostState = snackBarState) }) {
 
@@ -100,8 +133,15 @@ class MainActivity : ComponentActivity() {
 								viewModel = viewModel
 							)
 						} else {
-							NoPermissionPage {
-								permissionState.launchMultiplePermissionRequest()
+							if (permissionState.shouldShowRationale) isTriggershouldShowRationale =
+								true
+							NoPermissionPage(alwaysDenial) {
+								if (alwaysDenial.value){
+									openAppSettings()
+								}else {
+									permissionState.launchMultiplePermissionRequest()
+									lastRequestPermissionTime = System.currentTimeMillis()
+								}
 							}
 						}
 
@@ -109,8 +149,9 @@ class MainActivity : ComponentActivity() {
 							scope.launch {
 								snackBarState.showSnackbar(msgContent.value)
 							}
-							if (msgContent.value != "error")
-								viewModel.getCalendarAccountInfo(context)
+							if (msgContent.value != "error") viewModel.getCalendarAccountInfo(
+								context
+							)
 						}
 
 						when (viewModel.deleteState) {
@@ -138,6 +179,14 @@ class MainActivity : ComponentActivity() {
 			}
 		}
 	}
+
+	fun openAppSettings() {
+		val intent = Intent(
+			Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+			Uri.fromParts("package", packageName, null)
+		)
+		startActivity(intent)
+	}
 }
 
 @Composable
@@ -161,7 +210,7 @@ fun LocalCalendarAccount(modifier: Modifier, viewModel: MainViewModel) {
 
 			items(viewModel.calendarList) {
 				CalendarAccountItem(calendarInfoBean = it) { id ->
-					viewModel.deleteState = DeleteState.DeleteInfo(id,it.displayName)
+					viewModel.deleteState = DeleteState.DeleteInfo(id, it.displayName)
 				}
 			}
 		}
@@ -214,10 +263,11 @@ fun NoAccountPage() {
 }
 
 @Composable
-fun NoPermissionPage(requestPermisison: () -> Unit) {
+fun NoPermissionPage(alwaysDiandel: MutableState<Boolean>, requestPermisison: () -> Unit) {
 	Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
 		Text(
-			text = "点击来授予日历权限", modifier = Modifier.clickable(onClick = requestPermisison)
+			text = if (alwaysDiandel.value) "请在设置里允许日历编辑权限" else "点击来授予日历权限",
+			modifier = Modifier.clickable(onClick = requestPermisison)
 		)
 	}
 }
@@ -242,8 +292,7 @@ fun DeleteDialog(calendarName: String, id: Long, confirm: (Long) -> Unit, cancel
 			Text(text = "别瞎删，删除后对应账户下的日历事件也都会被删除，本地日历账户（我的日历、联系人的重要日期、中国节日）被删除后无法在三星日历里重新创建。")
 
 			Row(
-				modifier = Modifier
-					.fillMaxWidth()
+				modifier = Modifier.fillMaxWidth()
 			) {
 				Spacer(modifier = Modifier.weight(1f))
 				TextButton(onClick = { confirm.invoke(id) }) {
